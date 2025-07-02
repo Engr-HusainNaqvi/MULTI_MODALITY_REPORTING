@@ -11,7 +11,6 @@ from transformers import (
     GPT2Tokenizer, GPT2LMHeadModel
 )
 
-
 def select_image():
     root = tk.Tk()
     root.withdraw()
@@ -20,25 +19,23 @@ def select_image():
     )
     return file_path
 
-
 def load_image(path):
     img = Image.open(path).convert("RGB").resize((224, 224))
     img.show()
     return img
 
-
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"🖥️ Using device: {device}")
+    print(f"🖥️ Running on: {device}")
 
-    # Step 1: Load image
     image_path = select_image()
     if not image_path:
         print("❌ No image selected.")
         return
     img = load_image(image_path)
 
-    # Step 2: CLIP - image and text embedding
+    # --- CLIP: Visual-Text Embedding ---
+    print("📥 Loading CLIP model...")
     clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32").to(device)
     clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
 
@@ -66,7 +63,8 @@ def main():
 
     print("\n📚 Retrieved Reports:", retrieved_top)
 
-    # Step 3: BLIP - image captioning
+    # --- BLIP: Image Captioning ---
+    print("🖼️ Generating caption...")
     blip_model = BlipForConditionalGeneration.from_pretrained(
         "Salesforce/blip-image-captioning-base"
     ).to(device)
@@ -76,20 +74,25 @@ def main():
     blip_output = blip_model.generate(**blip_inputs)
     caption = blip_processor.decode(blip_output[0], skip_special_tokens=True)
 
-    print("\n🖼️ Generated Caption:", caption)
+    print("\n📝 Caption:", caption)
 
-    # Step 4: Falcon-7B - generate draft report
-    falcon_model_name = "tiiuae/falcon-7b-instruct"
-    falcon_tok = AutoTokenizer.from_pretrained(falcon_model_name)
-    falcon_model = AutoModelForCausalLM.from_pretrained(
-        falcon_model_name,
-        torch_dtype=torch.float16,
-        trust_remote_code=True
-    ).to(device).eval()
+    # --- Falcon: Draft Report Generation ---
+    print("🧠 Loading Falcon model and generating draft...")
+    try:
+        falcon_model_name = "tiiuae/falcon-7b-instruct"
+        falcon_tok = AutoTokenizer.from_pretrained(falcon_model_name)
+        falcon_model = AutoModelForCausalLM.from_pretrained(
+            falcon_model_name,
+            torch_dtype=torch.float16,
+            trust_remote_code=True
+        ).to(device).eval()
+    except Exception as e:
+        print(f"❌ Failed to load Falcon model: {e}")
+        return
 
     draft_prompt = (
         f"🧠 Caption: {caption}\n"
-        f"📚 Retrieved Reports:\n" + "\n".join(f"- {report}" for report in retrieved_top) +
+        f"📚 Retrieved Reports:\n" + "\n".join(f"- {r}" for r in retrieved_top) +
         "\n\nGenerate a clinical-style radiology report:"
     )
 
@@ -101,7 +104,8 @@ def main():
 
     print("\n📝 Draft Report:\n", draft_report)
 
-    # Step 5: GPT-2 - refine final report
+    # --- GPT-2: Final Refinement ---
+    print("✅ Refining with GPT-2...")
     gpt2_tok = GPT2Tokenizer.from_pretrained("distilgpt2")
     gpt2_model = GPT2LMHeadModel.from_pretrained("distilgpt2").to(device)
 
