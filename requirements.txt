@@ -4,5 +4,6 @@ sentence-transformers>=2.2.2
 timm>=0.9.10
 open_clip_torch>=2.23.0
 datasets>=2.19.0
+einops>=0.6.1
 Pillow>=10.3.0
 tk
