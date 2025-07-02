@@ -7,8 +7,7 @@ from tkinter import filedialog
 from transformers import (
     AutoTokenizer, AutoModelForCausalLM,
     CLIPProcessor, CLIPModel,
-    BlipProcessor, BlipForConditionalGeneration,
-    GPT2Tokenizer, GPT2LMHeadModel
+    BlipProcessor, BlipForConditionalGeneration
 )
 
 def select_image():
@@ -76,53 +75,37 @@ def main():
 
     print("\n📝 Caption:", caption)
 
-    # --- Falcon: Draft Report Generation ---
-    print("🧠 Loading Falcon model and generating draft...")
-    try:
-        falcon_model_name = "tiiuae/falcon-7b-instruct"
-        falcon_tok = AutoTokenizer.from_pretrained(falcon_model_name)
-        falcon_model = AutoModelForCausalLM.from_pretrained(
-            falcon_model_name,
-            torch_dtype=torch.float16,
-            trust_remote_code=True
-        ).to(device).eval()
-    except Exception as e:
-        print(f"❌ Failed to load Falcon model: {e}")
-        return
+    # --- GPT2-Large for both Draft and Final ---
+    print("🧠 Loading GPT2-large for draft + final...")
+    gpt2_model_name = "gpt2-large"
+    gpt2_tok = AutoTokenizer.from_pretrained(gpt2_model_name)
+    gpt2_model = AutoModelForCausalLM.from_pretrained(gpt2_model_name).to(device)
 
+    # Draft generation
     draft_prompt = (
         f"🧠 Caption: {caption}\n"
         f"📚 Retrieved Reports:\n" + "\n".join(f"- {r}" for r in retrieved_top) +
         "\n\nGenerate a clinical-style radiology report:"
     )
-
-    falcon_inputs = falcon_tok(draft_prompt, return_tensors="pt").to(device)
-    falcon_outputs = falcon_model.generate(
-        **falcon_inputs, max_new_tokens=256, do_sample=True, temperature=0.7
+    draft_inputs = gpt2_tok(draft_prompt, return_tensors="pt").to(device)
+    draft_outputs = gpt2_model.generate(
+        **draft_inputs, max_new_tokens=200, do_sample=True, temperature=0.7
     )
-    draft_report = falcon_tok.decode(falcon_outputs[0], skip_special_tokens=True)
-
+    draft_report = gpt2_tok.decode(draft_outputs[0], skip_special_tokens=True)
     print("\n📝 Draft Report:\n", draft_report)
 
-    # --- GPT-2: Final Refinement ---
-    print("✅ Refining with GPT-2...")
-    gpt2_tok = GPT2Tokenizer.from_pretrained("distilgpt2")
-    gpt2_model = GPT2LMHeadModel.from_pretrained("distilgpt2").to(device)
-
+    # Refinement step
     final_prompt = (
         f"Caption: {caption}\n"
         f"Draft: {draft_report}\n"
         f"Refine this into a structured radiology report:"
     )
-
-    gpt2_inputs = gpt2_tok(final_prompt, return_tensors="pt").to(device)
-    gpt2_outputs = gpt2_model.generate(
-        **gpt2_inputs, max_new_tokens=150, do_sample=True
+    final_inputs = gpt2_tok(final_prompt, return_tensors="pt").to(device)
+    final_outputs = gpt2_model.generate(
+        **final_inputs, max_new_tokens=150, do_sample=True
     )
-    final_report = gpt2_tok.decode(gpt2_outputs[0], skip_special_tokens=True)
-
+    final_report = gpt2_tok.decode(final_outputs[0], skip_special_tokens=True)
     print("\n✅ Final Radiology Report:\n", final_report)
-
 
 if __name__ == "__main__":
     main()
