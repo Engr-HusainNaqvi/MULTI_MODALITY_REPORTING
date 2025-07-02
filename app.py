@@ -1,4 +1,5 @@
 # 📦 Imports
+import streamlit as st
 import torch
 import torch.nn.functional as F
 from PIL import Image
@@ -9,34 +10,23 @@ from transformers import (
     AutoTokenizer, AutoModelForCausalLM
 )
 import warnings
-from flask import Flask, request, jsonify # Import Flask components
-from flask_cors import CORS # Import CORS for cross-origin requests
 
 warnings.filterwarnings('ignore')
 
-# Initialize Flask app
-app = Flask(__name__)
-CORS(app) # Enable CORS for all routes
-
 # 🔁 Device setup with memory optimization
+# This will be run once when the app starts
 device = "cuda" if torch.cuda.is_available() else "cpu"
-# Enable faster matmul on modern GPUs if CUDA is available
 if 'cuda' in device:
     torch.backends.cuda.matmul.allow_tf32 = True
 
-# Global variables to store loaded models
-# Models will be loaded once when the server starts
-clip_model, clip_proc = None, None
-blip_proc, blip_model = None, None
-falcon, falcon_tok = None, None
-refiner, r_tok = None, None
-
-# --- Model Loading Functions (modified to load once) ---
+# --- Model Loading Functions (using st.cache_resource for efficiency) ---
+@st.cache_resource
 @torch.no_grad()
 def load_all_models():
-    """Loads all necessary models into global variables."""
-    global clip_model, clip_proc, blip_proc, blip_model, falcon, falcon_tok, refiner, r_tok
-
+    """
+    Loads all necessary models into memory.
+    Uses st.cache_resource to load models only once across Streamlit reruns.
+    """
     print("🔄 Loading CLIP model...")
     clip_model = CLIPModel.from_pretrained(
         "openai/clip-vit-base-patch32",
@@ -44,7 +34,7 @@ def load_all_models():
         torch_dtype=torch.float16 if 'cuda' in device else torch.float32
     )
     clip_proc = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
-    print("CLIP model loaded.")
+    st.write("✅ CLIP model loaded.")
 
     print("\n🔄 Loading BLIP model...")
     blip_proc = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
@@ -53,7 +43,7 @@ def load_all_models():
         device_map="auto",
         torch_dtype=torch.float16 if 'cuda' in device else torch.float32
     )
-    print("BLIP model loaded.")
+    st.write("✅ BLIP model loaded.")
 
     print("\n🔄 Loading Falcon-7B model...")
     falcon_tok = AutoTokenizer.from_pretrained("tiiuae/falcon-7b-instruct")
@@ -63,7 +53,7 @@ def load_all_models():
         device_map="auto",
         low_cpu_mem_usage=True
     ).eval()
-    print("Falcon model loaded.")
+    st.write("✅ Falcon model loaded.")
 
     print("\n🔄 Loading Wizard-7B model...")
     r_tok = AutoTokenizer.from_pretrained("airesearch/wizard-7b-v1.0")
@@ -73,22 +63,25 @@ def load_all_models():
         device_map="auto",
         low_cpu_mem_usage=True
     ).eval()
-    print("Wizard model loaded.")
-    print("\nAll models loaded successfully!")
+    st.write("✅ Wizard model loaded.")
+    st.success("All AI models are ready!")
+    return clip_model, clip_proc, blip_proc, blip_model, falcon, falcon_tok, refiner, r_tok
 
+# Load all models once when the app starts
+clip_model, clip_proc, blip_proc, blip_model, falcon, falcon_tok, refiner, r_tok = load_all_models()
 
 # ---------------------------
-# Helper Functions (adapted for server use)
+# Helper Functions for Inference
 # ---------------------------
-def load_image_from_bytes(image_bytes):
+def load_image_from_uploaded_file(uploaded_file):
     """
-    Loads an image from bytes data and preprocesses it.
+    Loads an image from Streamlit's UploadedFile object.
     """
     try:
-        img = Image.open(io.BytesIO(image_bytes)).convert("RGB").resize((224, 224))
+        img = Image.open(io.BytesIO(uploaded_file.read())).convert("RGB").resize((224, 224))
         return img
     except Exception as e:
-        print(f"❌ Error loading image from bytes: {e}")
+        st.error(f"❌ Error loading image: {e}")
         return None
 
 def get_clip_features(img):
@@ -99,91 +92,99 @@ def get_clip_features(img):
         "Interstitial changes", "Pleural effusion",
         "Pulmonary edema", "Atelectasis"
     ]
-    # Process image
-    img_inputs = clip_proc(images=img, return_tensors="pt").to(device)
-    img_feat = clip_model.get_image_features(**img_inputs)
-    img_feat = F.normalize(img_feat, dim=-1)
+    with torch.no_grad():
+        img_inputs = clip_proc(images=img, return_tensors="pt").to(device)
+        img_feat = clip_model.get_image_features(**img_inputs)
+        img_feat = F.normalize(img_feat, dim=-1)
 
-    # Process text database
-    txt_inputs = clip_proc(text=report_db, return_tensors="pt", padding=True).to(device)
-    txt_feat = clip_model.get_text_features(**txt_inputs)
-    txt_feat = F.normalize(txt_feat, dim=-1)
+        txt_inputs = clip_proc(text=report_db, return_tensors="pt", padding=True).to(device)
+        txt_feat = clip_model.get_text_features(**txt_inputs)
+        txt_feat = F.normalize(txt_feat, dim=-1)
 
-    # Calculate similarity scores
-    scores = (txt_feat @ img_feat.T).squeeze()
-    retrieved = [report_db[i] for i in scores.topk(3).indices.tolist()]
+        scores = (txt_feat @ img_feat.T).squeeze()
+        retrieved = [report_db[i] for i in scores.topk(3).indices.tolist()]
     return retrieved
 
 def generate_blip_caption(img):
     """Generates a caption for the given image using BLIP."""
-    inputs = blip_proc(images=img, return_tensors="pt").to(device)
-    cap_ids = blip_model.generate(**inputs)
-    caption = blip_proc.decode(cap_ids[0], skip_special_tokens=True)
+    with torch.no_grad():
+        inputs = blip_proc(images=img, return_tensors="pt").to(device)
+        cap_ids = blip_model.generate(**inputs)
+        caption = blip_proc.decode(cap_ids[0], skip_special_tokens=True)
     return caption
 
 def generate_text(model, tokenizer, prompt, max_tokens=150):
     """Generates text using a given language model."""
-    inputs = tokenizer(prompt, return_tensors="pt").to(device)
-    output = model.generate(
-        **inputs,
-        max_new_tokens=max_tokens,
-        pad_token_id=tokenizer.eos_token_id
-    )
+    with torch.no_grad():
+        inputs = tokenizer(prompt, return_tensors="pt").to(device)
+        output = model.generate(
+            **inputs,
+            max_new_tokens=max_tokens,
+            pad_token_id=tokenizer.eos_token_id
+        )
     return tokenizer.decode(output[0], skip_special_tokens=True)
 
 
 # ---------------------------
-# Flask API Endpoint
+# Streamlit UI and Application Logic
 # ---------------------------
-@app.route('/generate_report', methods=['POST'])
-def generate_report_endpoint():
+st.set_page_config(page_title="Medical Report Generator", layout="centered")
+
+st.title("🩺 AI-Powered Medical Report Generator")
+st.markdown(
     """
-    API endpoint to receive an image, process it, and return a medical report.
+    Upload a chest X-ray image (JPG or PNG) and let our AI generate a professional medical report.
     """
-    if 'image' not in request.files:
-        return jsonify({'error': 'No image file provided'}), 400
+)
 
-    file = request.files['image']
-    if not file.filename:
-        return jsonify({'error': 'No selected file'}), 400
+uploaded_file = st.file_uploader(
+    "Upload a chest X-ray image (JPG or PNG)",
+    type=["jpg", "jpeg", "png"],
+    help="Supported formats: JPG, PNG"
+)
 
-    if not file.filename.lower().endswith(('.png', '.jpg', '.jpeg')):
-        return jsonify({'error': 'Invalid file type. Only JPG/PNG images are allowed.'}), 400
+if uploaded_file is not None:
+    st.image(uploaded_file, caption="Uploaded Image", use_column_width=True)
 
-    try:
-        img_bytes = file.read()
-        img = load_image_from_bytes(img_bytes)
+    # Load the image for processing
+    img = load_image_from_uploaded_file(uploaded_file)
 
-        if img is None:
-            return jsonify({'error': 'Could not process image.'}), 500
+    if img is not None:
+        with st.spinner("Generating report... This may take a moment."):
+            try:
+                # --- CLIP: Feature Extraction and Retrieval ---
+                st.subheader("1. Retrieving Similar Cases")
+                retrieved_reports = get_clip_features(img)
+                st.write("Top 3 matching reports from database:")
+                for i, report in enumerate(retrieved_reports, 1):
+                    st.write(f"- {report}")
 
-        # --- CLIP: Feature Extraction and Retrieval ---
-        retrieved_reports = get_clip_features(img)
+                # --- BLIP: Captioning ---
+                st.subheader("2. Generating Image Caption")
+                caption = generate_blip_caption(img)
+                st.write(f"**Image Caption:** {caption}")
 
-        # --- BLIP: Captioning ---
-        caption = generate_blip_caption(img)
+                # --- Falcon: Draft Generation ---
+                st.subheader("3. Generating Draft Report (Falcon)")
+                prompt_draft = f"Caption: {caption}\nReports:\n- "+ "\n- ".join(retrieved_reports) + "\nDraft:"
+                draft_report = generate_text(falcon, falcon_tok, prompt_draft, 150)
+                st.write(f"**Draft Report:** {draft_report}")
 
-        # --- Falcon: Draft Generation ---
-        prompt_draft = f"Caption: {caption}\nReports:\n- "+ "\n- ".join(retrieved_reports) + "\nDraft:"
-        draft_report = generate_text(falcon, falcon_tok, prompt_draft, 150)
+                # --- Wizard: Refined Report Generation ---
+                st.subheader("4. Refining Report (Wizard)")
+                prompt_refined = f"Caption: {caption}\nDraft: {draft_report}\nRefine this medical report to be more professional:"
+                refined_report = generate_text(refiner, r_tok, prompt_refined, 100)
+                st.success("Report generation complete!")
 
-        # --- Wizard: Refined Report Generation ---
-        prompt_refined = f"Caption: {caption}\nDraft: {draft_report}\nRefine this medical report to be more professional:"
-        refined_report = generate_text(refiner, r_tok, prompt_refined, 100)
+                st.markdown("---")
+                st.subheader("✨ Final Professional Medical Report:")
+                st.text_area("Final Report", refined_report, height=200)
+                st.markdown("---")
 
-        return jsonify({'report': refined_report})
-
-    except Exception as e:
-        print(f"An error occurred: {e}")
-        return jsonify({'error': f'An internal server error occurred: {str(e)}'}), 500
-
-# ---------------------------
-# Main execution for Flask app
-# ---------------------------
-if __name__ == "__main__":
-    # Load all models when the Flask application starts
-    load_all_models()
-    # Run the Flask app
-    # Host on 0.0.0.0 to make it accessible from other machines/containers
-    # Debug=True is for development only; set to False in production
-    app.run(host='0.0.0.0', port=5000, debug=True)
+            except Exception as e:
+                st.error(f"An error occurred during report generation: {e}")
+                st.info("Please try uploading another image or check the console for more details.")
+    else:
+        st.warning("Please upload a valid image file to proceed.")
+else:
+    st.info("Upload a chest X-ray image above to get started!")
