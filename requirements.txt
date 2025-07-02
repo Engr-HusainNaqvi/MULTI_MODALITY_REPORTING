@@ -1,5 +1,6 @@
 streamlit
-transformers
-torch
-accelerate
-evaluate
+transformers==4.41.1
+torch==2.3.0
+accelerate==0.30.1
+evaluate==0.4.2
+Pillow
