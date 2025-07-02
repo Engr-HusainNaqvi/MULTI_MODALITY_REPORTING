@@ -1,11 +1,6 @@
-torch
-transformers
-Pillow
-timm
-sentence-transformers
-open_clip_torch
-evaluate
-tqdm
-Flask
-Flask-Cors
 streamlit
+transformers
+torch
+accelerate
+bitsandbytes
+evaluate
